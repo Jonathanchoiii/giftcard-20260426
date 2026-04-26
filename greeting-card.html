@@ -1541,6 +1541,10 @@
 
   const FOG_BRUSH = 28;
   const FOG_BLUR = 18;
+  /** 手机等触控设备上水雾易显淡：略增乳白与微粒，非性能瓶颈（仅 init 时绘制一次） */
+  const FOG_BLUR_TOUCH = 16;
+  const FOG_MILK_ALPHA_DESKTOP = 0.24;
+  const FOG_MILK_ALPHA_TOUCH = 0.4;
   const REVEAL_PROGRESS = 0.6;
 
   const POLAROID_MAX = 100;
@@ -1601,6 +1605,8 @@
   let polaroidMotionAttached = false;
   let polaroidMotionPending = false;
   let polaroidLastShakeAt = 0;
+  /** 上一帧重力，用于 iOS 上 acceleration 为空时做帧间差分检测摇晃 */
+  let polaroidLastGrav = null;
 
   let coatGestureKind = null;
   let coatGestureSX = 0;
@@ -1784,7 +1790,8 @@
     }
     if (effect === 'polaroid') {
       hintEl.textContent = '拍立得显影';
-      hintSubEl.textContent = '摇晃手机或快速点击画面，让封面慢慢显现';
+      hintSubEl.textContent =
+        '摇晃手机或快速点击画面显影；若摇晃无反应，请先轻点封面授权运动传感器（iPhone 需要）';
       return;
     }
     if (effect === 'scratch') {
@@ -2318,6 +2325,14 @@
     renderPixelFrame();
   }
 
+  function isFogTouchUi() {
+    return (
+      window.matchMedia &&
+      (window.matchMedia('(hover: none)').matches ||
+        window.matchMedia('(pointer: coarse)').matches)
+    );
+  }
+
   function buildFogTexture() {
     const w = coatCanvas.width;
     const h = coatCanvas.height;
@@ -2325,12 +2340,28 @@
     c.width = w;
     c.height = h;
     const x = c.getContext('2d');
+    const touchUi = isFogTouchUi();
+    const blurPx = touchUi ? FOG_BLUR_TOUCH : FOG_BLUR;
+    const milkA = touchUi ? FOG_MILK_ALPHA_TOUCH : FOG_MILK_ALPHA_DESKTOP;
     x.save();
-    x.filter = `blur(${FOG_BLUR}px)`;
+    x.filter = 'blur(' + blurPx + 'px)';
     x.drawImage(coverCanvas, 0, 0, w, h);
     x.restore();
-    x.fillStyle = 'rgba(255, 255, 255, 0.22)';
+    x.fillStyle = 'rgba(255, 255, 255, ' + milkA + ')';
     x.fillRect(0, 0, w, h);
+    if (touchUi) {
+      x.globalAlpha = 0.11;
+      x.fillStyle = 'rgba(220, 228, 240, 0.95)';
+      for (let i = 0; i < 140; i++) {
+        x.fillRect(Math.random() * w, Math.random() * h, 1.2, 1.2);
+      }
+      x.globalAlpha = 0.07;
+      x.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      for (let j = 0; j < 90; j++) {
+        x.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+      }
+      x.globalAlpha = 1;
+    }
     fogTexture = c;
   }
 
@@ -2370,6 +2401,7 @@
     }
     polaroidMotionPending = false;
     polaroidLastShakeAt = 0;
+    polaroidLastGrav = null;
   }
 
   function attachPolaroidDevMotion() {
@@ -2382,13 +2414,24 @@
     if (polaroidMotionAttached || effect !== 'polaroid' || revealed || locked) return;
     const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (reduced) return;
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    const needMotionPerm =
+      typeof DeviceMotionEvent !== 'undefined' &&
+      typeof DeviceMotionEvent.requestPermission === 'function';
+    const needOrientPerm =
+      typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function';
+    if (needMotionPerm || needOrientPerm) {
       if (polaroidMotionPending) return;
       polaroidMotionPending = true;
-      DeviceMotionEvent.requestPermission()
-        .then(function (state) {
+      const reqs = [];
+      if (needMotionPerm) reqs.push(DeviceMotionEvent.requestPermission());
+      if (needOrientPerm) reqs.push(DeviceOrientationEvent.requestPermission());
+      Promise.all(reqs)
+        .then(function (states) {
           polaroidMotionPending = false;
-          if (state === 'granted') attachPolaroidDevMotion();
+          if (states.some(function (s) { return s === 'granted'; })) {
+            attachPolaroidDevMotion();
+          }
         })
         .catch(function () {
           polaroidMotionPending = false;
@@ -2401,26 +2444,54 @@
   function onPolaroidDeviceMotion(e) {
     if (effect !== 'polaroid' || revealed || locked) return;
     const now = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
-    if (now - polaroidLastShakeAt < 72) return;
+    if (now - polaroidLastShakeAt < 40) return;
     polaroidLastShakeAt = now;
-    let ax = 0;
-    let ay = 0;
-    let az = 0;
-    const ac = e.acceleration;
-    if (ac && (ac.x != null || ac.y != null || ac.z != null)) {
-      ax = ac.x || 0;
-      ay = ac.y || 0;
-      az = ac.z || 0;
-    } else {
-      const g = e.accelerationIncludingGravity;
-      if (!g) return;
-      ax = g.x || 0;
-      ay = g.y || 0;
-      az = g.z || 0;
+
+    let bump = 0;
+
+    const rr = e.rotationRate;
+    if (rr && (rr.alpha != null || rr.beta != null || rr.gamma != null)) {
+      const spin =
+        Math.abs(rr.alpha || 0) + Math.abs(rr.beta || 0) + Math.abs(rr.gamma || 0);
+      if (spin > 28) {
+        bump = POLAROID_SHAKE * Math.min(2.4, (spin - 28) / 85);
+      }
     }
-    const mag = Math.sqrt(ax * ax + ay * ay + az * az);
-    if (mag < 4.5) return;
-    polaroidEnergy = Math.min(POLAROID_MAX, polaroidEnergy + POLAROID_SHAKE * ((mag - 4.5) / 8));
+
+    if (bump <= 0) {
+      const ac = e.acceleration;
+      if (ac && (ac.x != null || ac.y != null || ac.z != null)) {
+        const ax = ac.x || 0;
+        const ay = ac.y || 0;
+        const az = ac.z || 0;
+        const mag = Math.sqrt(ax * ax + ay * ay + az * az);
+        if (mag > 0.5) {
+          bump = POLAROID_SHAKE * Math.min(2.5, mag / 3);
+        }
+      }
+    }
+
+    if (bump <= 0) {
+      const g = e.accelerationIncludingGravity;
+      if (g && (g.x != null || g.y != null || g.z != null)) {
+        const gx = g.x || 0;
+        const gy = g.y || 0;
+        const gz = g.z || 0;
+        if (polaroidLastGrav) {
+          const dx = gx - polaroidLastGrav.x;
+          const dy = gy - polaroidLastGrav.y;
+          const dz = gz - polaroidLastGrav.z;
+          const jerk = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (jerk > 0.38) {
+            bump = POLAROID_SHAKE * Math.min(2.6, jerk * 1.35);
+          }
+        }
+        polaroidLastGrav = { x: gx, y: gy, z: gz };
+      }
+    }
+
+    if (bump <= 0) return;
+    polaroidEnergy = Math.min(POLAROID_MAX, polaroidEnergy + bump);
     drawPolaroidCoat();
     if (polaroidEnergy >= POLAROID_MAX) triggerReveal();
   }
@@ -2474,6 +2545,7 @@
 
   function initPolaroidCoat() {
     polaroidEnergy = 0;
+    polaroidLastGrav = null;
     grid.clear();
     circles = [];
     nextCircleId = 1;
@@ -2482,6 +2554,13 @@
     coatCtx.globalAlpha = 1;
     buildPolaroidVeil();
     drawPolaroidCoat();
+    /* Android 等无需 requestPermission：尽早监听 devicemotion，用户可先摇再点 */
+    if (
+      typeof DeviceMotionEvent === 'undefined' ||
+      typeof DeviceMotionEvent.requestPermission !== 'function'
+    ) {
+      attachPolaroidDevMotion();
+    }
   }
 
   function syncPuzzleUI() {
