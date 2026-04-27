@@ -1561,20 +1561,17 @@
    */
   const EFFECTS = ['polaroid', 'fog', 'scratch', 'puzzle'];
   let effectSequenceCursor = 0;
-  function assignOrderedEffects(list) {
-    return list.map(function (item, index) {
-      item.__displayEffect = EFFECTS[(effectSequenceCursor + index) % EFFECTS.length];
-      return item;
-    });
-  }
-  function commitAssignedEffects(list) {
-    if (!list.length) return list;
-    effectSequenceCursor = (effectSequenceCursor + list.length) % EFFECTS.length;
-    return list;
+  function ensureTrackEffect(item) {
+    if (!item) return EFFECTS[0];
+    if (!item.__displayEffect) {
+      item.__displayEffect = EFFECTS[effectSequenceCursor];
+      effectSequenceCursor = (effectSequenceCursor + 1) % EFFECTS.length;
+    }
+    return item.__displayEffect;
   }
   function pickEffectForCurrentTrack() {
     const current = results[resultIndex];
-    return (current && current.__displayEffect) || EFFECTS[0];
+    return ensureTrackEffect(current);
   }
 
   let dpr = 1;
@@ -2239,7 +2236,6 @@
     });
     results = diversifyByArtist(filtered, 6);
     shuffle(results);
-    commitAssignedEffects(assignOrderedEffects(results));
     resultIndex = -1;
 
     if (results.length === 0) {
@@ -2248,7 +2244,6 @@
         if (pool.length) {
           results = diversifyByArtist(pool.slice(), 6);
           shuffle(results);
-          commitAssignedEffects(assignOrderedEffects(results));
           resultIndex = -1;
         }
       } catch (e) {
@@ -2981,6 +2976,7 @@
         }
       }
       const r = results[resultIndex];
+      ensureTrackEffect(r);
       await applyTrack(r);
       bgm.src = r.previewUrl;
       try {
