@@ -1553,14 +1553,33 @@
   const POLAROID_DRAG = 0.42;
   const POLAROID_SHAKE = 6.2;
 
-  const EFFECTS = ['scratch', 'pixel', 'fog', 'puzzle', 'polaroid'];
-  function pickRandomEffect() {
-    return EFFECTS[Math.floor(Math.random() * EFFECTS.length)];
+  /**
+   * 固定 4 效果循环：
+   * 拍立得 → 水雾 → 涂层 → 拼图
+   * 每 4 个为一组，严格按这个顺序出现，不再随机。
+   * 底层“涂层”统一映射到 scratch 这一种交互实现。
+   */
+  const EFFECTS = ['polaroid', 'fog', 'scratch', 'puzzle'];
+  let effectSequenceCursor = 0;
+  function assignOrderedEffects(list) {
+    return list.map(function (item, index) {
+      item.__displayEffect = EFFECTS[(effectSequenceCursor + index) % EFFECTS.length];
+      return item;
+    });
+  }
+  function commitAssignedEffects(list) {
+    if (!list.length) return list;
+    effectSequenceCursor = (effectSequenceCursor + list.length) % EFFECTS.length;
+    return list;
+  }
+  function pickEffectForCurrentTrack() {
+    const current = results[resultIndex];
+    return (current && current.__displayEffect) || EFFECTS[0];
   }
 
   let dpr = 1;
   let cardCss = 380;
-  let effect = pickRandomEffect();
+  let effect = EFFECTS[0];
 
   let results = [];
   let resultIndex = -1;
@@ -2220,6 +2239,7 @@
     });
     results = diversifyByArtist(filtered, 6);
     shuffle(results);
+    commitAssignedEffects(assignOrderedEffects(results));
     resultIndex = -1;
 
     if (results.length === 0) {
@@ -2228,6 +2248,7 @@
         if (pool.length) {
           results = diversifyByArtist(pool.slice(), 6);
           shuffle(results);
+          commitAssignedEffects(assignOrderedEffects(results));
           resultIndex = -1;
         }
       } catch (e) {
@@ -2929,7 +2950,7 @@
   function resetUIForNewTrack() {
     revealed = false;
     locked = false;
-    effect = pickRandomEffect();
+    effect = pickEffectForCurrentTrack();
     coatCanvas.classList.remove('reveal-fade');
     hintEl.classList.remove('f-out', 'f-in');
     if (textColBottom) textColBottom.classList.remove('show');
